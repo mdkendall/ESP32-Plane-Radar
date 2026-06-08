@@ -86,7 +86,7 @@ constexpr int kDisplayWidth = 240;
 constexpr int kDisplayHeight = 240;
 constexpr int kDisplayOffsetX = 0;
 constexpr int kDisplayOffsetY = 40;
-constexpr int kDisplayRotation = 1;
+constexpr int kDisplayRotation = 3;
 constexpr bool kDisplayInvert = false;
 constexpr bool kDisplayRgbOrder = false;
 #else
