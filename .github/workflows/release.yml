@@ -11,8 +11,34 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag_name: ${{ steps.meta.outputs.tag_name }}
+    steps:
+      - name: Determine release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="manual-${GITHUB_SHA::7}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - supermini
+          - seeed_xiao
+          - sunton_2432s028r
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,23 +64,42 @@ jobs:
 
       - name: Build and merge
         run: |
-          pio run -e supermini
-          pio run -t merge -e supermini
+          pio run -e ${{ matrix.env }}
+          pio run -t merge -e ${{ matrix.env }}
 
-      - name: Package release files
+      - name: Package release assets
         run: |
-          VERSION="${GITHUB_REF_NAME}"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            VERSION="manual-${GITHUB_SHA::7}"
-          fi
           mkdir -p dist
-          cp .pio/build/supermini/firmware-merged.bin "dist/plane-radar-${VERSION}.bin"
-          sha256sum "dist/plane-radar-${VERSION}.bin" > "dist/plane-radar-${VERSION}.bin.sha256"
-          echo "version=${VERSION}" >> "$GITHUB_ENV"
+          FILENAME="plane-radar-${{ matrix.env }}-${{ needs.prepare.outputs.version }}.bin"
+          cp ".pio/build/${{ matrix.env }}/firmware-merged.bin" "dist/${FILENAME}"
+          sha256sum "dist/${FILENAME}" > "dist/${FILENAME}.sha256"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.env }}
+          if-no-files-found: error
+          path: dist/*
+
+  release:
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - build
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          name: ${{ needs.prepare.outputs.version }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
           generate_release_notes: true
         env:

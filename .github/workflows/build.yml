@@ -14,6 +14,13 @@ concurrency:
 jobs:
   firmware:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - supermini
+          - seeed_xiao
+          - sunton_2432s028r
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,18 +45,18 @@ jobs:
         run: pip install --upgrade platformio
 
       - name: Build
-        run: pio run -e supermini
+        run: pio run -e ${{ matrix.env }}
 
       - name: Merge web-flash image
-        run: pio run -t merge -e supermini
+        run: pio run -t merge -e ${{ matrix.env }}
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: plane-radar-supermini
+          name: plane-radar-${{ matrix.env }}
           if-no-files-found: error
           path: |
-            .pio/build/supermini/firmware-merged.bin
-            .pio/build/supermini/firmware.bin
-            .pio/build/supermini/bootloader.bin
-            .pio/build/supermini/partitions.bin
+            .pio/build/${{ matrix.env }}/firmware-merged.bin
+            .pio/build/${{ matrix.env }}/firmware.bin
+            .pio/build/${{ matrix.env }}/bootloader.bin
+            .pio/build/${{ matrix.env }}/partitions.bin
