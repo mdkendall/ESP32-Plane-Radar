@@ -12,6 +12,8 @@ Firmware for an **ESP32-C3** and a **1.28″ round display** (240×240px). Shows
    1. **3D printed case (STL + assembly):** [MakerWorld](https://makerworld.com/en/models/2872376-esp32-plane-radar-live-ads-b-on-a-round-display#profileId-3207083)
 2. Seeed Studio XIAO Round Display with XIAO ESP32-C3
    1. Off the shelf plug-and-play solution with several 3d case designs
+3. Sunton ESP32-2432S028R (`esp32dev` compatible) with 2.8" ILI9341 display
+   1. Uses the centered 240×240 portion of the 320×240 panel so the existing radar UI stays unchanged
 
 ## What it does
 
@@ -91,7 +93,7 @@ Edit **`include/config.h`** for hardware and behavior:
 | Portal | `kPortalApName`, `kPortalIp`, `kPortalHostname` / `kPortalHostUrl` (mDNS; needs `-DWM_MDNS` in `platformio.ini`) |
 | Wi‑Fi timing | connect attempts, reconnect grace, portal timeout (`0` = no timeout) |
 | BOOT | `kBootPin`, `kBootResetHoldMs`, `kBootTapMinMs` |
-| Display SPI | pins, `kDisplayInvert`, `kDisplayRgbOrder`, `kDisplaySpiWriteHz` |
+| Display SPI | pins, panel memory/viewport size, `kDisplayRotation`, `kDisplayInvert`, `kDisplayRgbOrder`, `kDisplaySpiWriteHz` |
 | Default location | `kDefaultRadarLat`, `kDefaultRadarLon` (until portal overrides) |
 | ADS-B | `kAdsbFetchIntervalMs`, `kAdsbShowGroundAircraft` |
 
@@ -147,6 +149,18 @@ pio device monitor
 - PlatformIO env: **`supermini`**
 - Serial: **115200** baud
 - USB CDC on boot enabled in `platformio.ini` for the Super Mini
+
+### Sunton ESP32-2432S028R
+
+```bash
+pio run -e sunton_2432s028r
+pio run -e sunton_2432s028r -t upload
+pio device monitor -p COM5
+```
+
+- PlatformIO env: **`sunton_2432s028r`**
+- Board: **`esp32dev`**
+- Display: **ILI9341 320×240**, with the firmware rendered into the centered **240×240** viewport
 
 ### Web-flashable release image
 
