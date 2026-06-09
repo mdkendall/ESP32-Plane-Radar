@@ -59,6 +59,13 @@ constexpr char kWifiPrefsNamespace[] = "wifi";
 constexpr char kPrefsForcePortalKey[] = "portal";
 
 bool s_force_config_portal = false;
+WiFiManager s_wm;
+bool s_wm_configured = false;
+
+void ensureWifiManager();
+void startLanWebPortal();
+void stopLanWebPortal();
+bool wifiLinkUp();
 
 constexpr int kCoordParamLen = 20;
 constexpr char kCoordInputAttrs[] =
@@ -73,6 +80,10 @@ char s_miles_checkbox_attrs[32] = "type=\"checkbox\"";
 WiFiManagerParameter s_param_miles("use_miles", "Display distances in miles", "T", 2,
                                    s_miles_checkbox_attrs, WFM_LABEL_AFTER);
 
+char s_runways_checkbox_attrs[32] = "type=\"checkbox\"";
+WiFiManagerParameter s_param_runways("show_runways", "Show airport runways", "T", 2,
+                                     s_runways_checkbox_attrs, WFM_LABEL_AFTER);
+
 void refreshPortalParamDefaults() {
   char lat_buf[kCoordParamLen + 1];
   char lon_buf[kCoordParamLen + 1];
@@ -83,6 +94,9 @@ void refreshPortalParamDefaults() {
   snprintf(s_miles_checkbox_attrs, sizeof(s_miles_checkbox_attrs), "type=\"checkbox\"%s",
            ui::radar::useMiles() ? " checked" : "");
   s_param_miles.setValue("T", 2);
+  snprintf(s_runways_checkbox_attrs, sizeof(s_runways_checkbox_attrs),
+           "type=\"checkbox\"%s", ui::radar::showRunways() ? " checked" : "");
+  s_param_runways.setValue("T", 2);
 }
 
 void onPortalParamsSaved() {
@@ -91,6 +105,7 @@ void onPortalParamsSaved() {
     Serial.println("Invalid lat/lon in portal — keeping previous location");
   }
   ui::radar::saveMilesFromPortal(s_param_miles.getValue());
+  ui::radar::saveRunwaysFromPortal(s_param_runways.getValue());
 }
 
 void attachPortalParams(WiFiManager& wm) {
@@ -98,6 +113,7 @@ void attachPortalParams(WiFiManager& wm) {
   wm.addParameter(&s_param_lat);
   wm.addParameter(&s_param_lon);
   wm.addParameter(&s_param_miles);
+  wm.addParameter(&s_param_runways);
   wm.setSaveParamsCallback(onPortalParamsSaved);
 }
 
@@ -154,14 +170,15 @@ bool storedWifiCredentials() {
 }
 
 void eraseWifiCredentials() {
+  stopLanWebPortal();
   WiFi.setAutoReconnect(false);
   WiFi.mode(WIFI_OFF);
   delay(100);
 
+  ensureWifiManager();
   WiFi.persistent(true);
-  WiFiManager wm;
-  wm.resetSettings();
-  wm.erase();
+  s_wm.resetSettings();
+  s_wm.erase();
   WiFi.disconnect(true, true);
   WiFi.persistent(false);
 
@@ -192,18 +209,51 @@ void onConfigPortalApStarted(WiFiManager*) {
 #endif
 }
 
-void configureWifiManager(WiFiManager& wm) {
-  wm.setConfigPortalTimeout(config::kWifiPortalTimeoutSec);
-  wm.setAPStaticIPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
-                         IPAddress(255, 255, 255, 0));
-  wm.setHostname(config::kPortalHostname);
-  wm.setAPCallback(onConfigPortalApStarted);
-  attachPortalParams(wm);
-}
-
 bool wifiLinkUp() {
   return WiFi.status() == WL_CONNECTED &&
          WiFi.localIP() != IPAddress(0, 0, 0, 0);
+}
+
+void ensureWifiManager() {
+  if (s_wm_configured) {
+    return;
+  }
+  s_wm.setConfigPortalTimeout(config::kWifiPortalTimeoutSec);
+  s_wm.setAPStaticIPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
+                           IPAddress(255, 255, 255, 0));
+  s_wm.setHostname(config::kPortalHostname);
+  s_wm.setAPCallback(onConfigPortalApStarted);
+  attachPortalParams(s_wm);
+  s_wm_configured = true;
+}
+
+void startLanWebPortal() {
+  if (!wifiLinkUp() || s_wm.getWebPortalActive() ||
+      s_wm.getConfigPortalActive()) {
+    return;
+  }
+  refreshPortalParamDefaults();
+  WiFi.mode(WIFI_STA);
+  s_wm.setConfigPortalBlocking(false);
+#ifdef WM_MDNS
+  MDNS.end();
+  if (MDNS.begin(config::kPortalHostname)) {
+    MDNS.addService("http", "tcp", 80);
+  }
+#endif
+  s_wm.startWebPortal();
+  Serial.printf("LAN config: http://%s.local or http://%s\n",
+                config::kPortalHostname, WiFi.localIP().toString().c_str());
+}
+
+void stopLanWebPortal() {
+  if (!s_wm.getWebPortalActive()) {
+    return;
+  }
+  s_wm.stopWebPortal();
+#ifdef WM_MDNS
+  MDNS.end();
+#endif
 }
 
 void prepareSta() {
@@ -268,25 +318,26 @@ bool connectSavedNetwork(bool show_ui) {
     return false;
   }
 
-  WiFiManager wm;
-  const String ssid = wm.getWiFiSSID();
+  ensureWifiManager();
+  const String ssid = s_wm.getWiFiSSID();
   if (ssid.length() == 0) {
     return false;
   }
-  const String pass = wm.getWiFiPass();
+  const String pass = s_wm.getWiFiPass();
   return tryConnectWithUi(ssid, pass, show_ui);
 }
 
-bool openConfigPortal(WiFiManager& wm) {
+bool openConfigPortal() {
+  stopLanWebPortal();
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   delay(50);
   statusScreenPortal();
-  wm.setConfigPortalBlocking(false);
-  wm.startConfigPortal(config::kPortalApName);
-  while (wm.getConfigPortalActive()) {
+  s_wm.setConfigPortalBlocking(false);
+  s_wm.startConfigPortal(config::kPortalApName);
+  while (s_wm.getConfigPortalActive()) {
     bootButtonPollLongPress();
-    if (wm.process()) {
+    if (s_wm.process()) {
       return true;
     }
     delay(10);
@@ -362,8 +413,24 @@ bool wifiReconnect() {
   return connectSavedNetwork(true);
 }
 
+void wifiLoop() {
+  ensureWifiManager();
+  if (wifiLinkUp()) {
+    if (!s_wm.getWebPortalActive() && !s_wm.getConfigPortalActive()) {
+      startLanWebPortal();
+    }
+    if (s_wm.getWebPortalActive() || s_wm.getConfigPortalActive()) {
+      bootButtonPollLongPress();
+      s_wm.process();
+    }
+  } else {
+    stopLanWebPortal();
+  }
+}
+
 bool wifiSetupConnect() {
   initBootButton();
+  ensureWifiManager();
 
   const bool force_portal = consumeForceConfigPortal();
   WiFi.setAutoReconnect(false);
@@ -374,12 +441,9 @@ bool wifiSetupConnect() {
     delay(100);
   }
 
-  WiFiManager wm;
-  configureWifiManager(wm);
-
   if (force_portal) {
     Serial.println("Opening WiFi setup portal (after reset)");
-    if (openConfigPortal(wm) && wifiLinkUp()) {
+    if (openConfigPortal() && wifiLinkUp()) {
       WiFi.setAutoReconnect(true);
       Serial.printf("Connected: %s  IP %s\n", WiFi.SSID().c_str(),
                     WiFi.localIP().toString().c_str());
@@ -412,7 +476,7 @@ bool wifiSetupConnect() {
     Serial.println("No saved WiFi — opening setup portal");
   }
 
-  if (openConfigPortal(wm) && wifiLinkUp()) {
+  if (openConfigPortal() && wifiLinkUp()) {
     WiFi.setAutoReconnect(true);
     Serial.printf("Connected: %s  IP %s\n", WiFi.SSID().c_str(),
                   WiFi.localIP().toString().c_str());

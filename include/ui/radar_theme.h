@@ -45,6 +45,11 @@ constexpr float kAircraftTrackRefOuterKm = 13.3f;
 constexpr float kAircraftTrackLengthScale = 1.5f / 5.0f;
 /** drawWideLine half-width for speed vectors (~2 px total). */
 constexpr float kAircraftTrackLineHalfWidth = 1.0f;
+
+constexpr float kRunwayLineWidthPx = 2.0f;
+constexpr float kRunwayLineHalfWidth = kRunwayLineWidthPx * 0.5f;
+constexpr int kRunwayLabelHeightPx = kCardinalLabelHeightPx;
+constexpr int kRunwayLabelGapPx = 3;
 /** Gap from triangle edge to tag block (px). */
 constexpr int kAircraftLabelGapPx = 1;
 /** Keep symbol centroid inside outer ring by at least this inset (px). */
@@ -76,6 +81,13 @@ constexpr uint8_t kTagTypeB = 0;
 constexpr uint8_t kTagAltR = 90;
 constexpr uint8_t kTagAltG = 200;
 constexpr uint8_t kTagAltB = 255;
+constexpr uint8_t kRunwayR = 56;
+constexpr uint8_t kRunwayG = 150;
+constexpr uint8_t kRunwayB = 170;
+/** Lighter teal for ICAO labels (vs runway lines). */
+constexpr uint8_t kRunwayLabelR = 110;
+constexpr uint8_t kRunwayLabelG = 210;
+constexpr uint8_t kRunwayLabelB = 230;
 
 extern uint16_t kColorBackground;
 extern uint16_t kColorGrid;
@@ -85,5 +97,7 @@ extern uint16_t kColorAircraft;
 extern uint16_t kColorTrackVector;
 extern uint16_t kColorTagType;
 extern uint16_t kColorTagAltitude;
+extern uint16_t kColorRunway;
+extern uint16_t kColorRunwayLabel;
 
 }  // namespace ui::radar
