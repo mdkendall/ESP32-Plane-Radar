@@ -660,7 +660,7 @@ bool ensureFrameSprite() {
   if (s_frame_ready) {
     return true;
   }
-  s_frame.setColorDepth(16);
+  s_frame.setColorDepth(8);
   if (!s_frame.createSprite(radar::kSize, radar::kSize)) {
     Serial.println("radar: frame sprite alloc failed");
     return false;
