@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 
 #include "config.h"
@@ -91,6 +92,7 @@ float findVlwSizeForHeight(int target_px) {
 }
 
 void applyScaleStyle();
+int scaleLabelAnchorX(int cx, int outer_radius);
 
 const lgfx::GFXfont* pickGfxFontClosest(
     int target_px, const lgfx::GFXfont* const* candidates, size_t count) {
@@ -431,46 +433,249 @@ int measureTagBlockWidth(const services::adsb::Aircraft& plane) {
   return max_w;
 }
 
-void drawAircraftTag(int x, int y, const services::adsb::Aircraft& plane) {
+bool hasAircraftTag(const services::adsb::Aircraft& plane) {
+  return plane.callsign[0] != '\0' || plane.type[0] != '\0' ||
+         plane.alt[0] != '\0';
+}
+
+struct TagRect {
+  TagRect() : x(0), y(0), width(0), height(0) {}
+  TagRect(int x_in, int y_in, int width_in, int height_in)
+      : x(x_in), y(y_in), width(width_in), height(height_in) {}
+
+  int x;
+  int y;
+  int width;
+  int height;
+};
+
+struct TagPlacement {
+  TagRect rect;
+  uint8_t candidate = 0;
+};
+
+constexpr uint8_t kTagCandidateCount = 8;
+constexpr uint8_t kTagRight = 0;
+constexpr uint8_t kTagLeft = 1;
+constexpr uint8_t kTagRightUp = 2;
+constexpr uint8_t kTagLeftUp = 3;
+constexpr uint8_t kTagRightDown = 4;
+constexpr uint8_t kTagLeftDown = 5;
+constexpr uint8_t kTagAbove = 6;
+constexpr uint8_t kTagBelow = 7;
+constexpr uint32_t kTagCacheExpiryFrames = 80;
+
+struct TagCacheEntry {
+  char hex[sizeof(services::adsb::Aircraft::hex)] = {};
+  uint8_t candidate = 0;
+  uint32_t last_seen_frame = 0;
+};
+
+TagCacheEntry s_tag_cache[services::adsb::kMaxAircraft];
+uint32_t s_tag_layout_frame = 0;
+uint8_t s_tag_cache_range_index = 0xff;
+
+bool tagRectsOverlap(const TagRect& a, const TagRect& b) {
+  return a.x < b.x + b.width && a.x + a.width > b.x &&
+         a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+int tagOverlapArea(const TagRect& a, const TagRect& b) {
+  const int left = std::max(a.x, b.x);
+  const int top = std::max(a.y, b.y);
+  const int right = std::min(a.x + a.width, b.x + b.width);
+  const int bottom = std::min(a.y + a.height, b.y + b.height);
+  return right > left && bottom > top ? (right - left) * (bottom - top) : 0;
+}
+
+bool tagRectOnScreen(const TagRect& rect) {
+  return rect.x >= 1 && rect.y >= 1 &&
+         rect.x + rect.width < radar::kSize - 1 &&
+         rect.y + rect.height < radar::kSize - 1;
+}
+
+TagPlacement tagPlacementForCandidate(int x, int y, int width, int height,
+                                      uint8_t candidate) {
+  const int symbol_half =
+      radar::kAircraftNoseLenPx + radar::kAircraftTailHalfPx;
+  const int side_offset = symbol_half + radar::kAircraftLabelGapPx;
+  TagPlacement placement;
+  placement.candidate = candidate;
+  placement.rect.width = width;
+  placement.rect.height = height;
+
+  switch (candidate) {
+    case kTagRight:
+      placement.rect.x = x + side_offset;
+      placement.rect.y = y - height / 2;
+      break;
+    case kTagLeft:
+      placement.rect.x = x - side_offset - width;
+      placement.rect.y = y - height / 2;
+      break;
+    case kTagRightUp:
+      placement.rect.x = x + side_offset;
+      placement.rect.y = y - side_offset - height;
+      break;
+    case kTagLeftUp:
+      placement.rect.x = x - side_offset - width;
+      placement.rect.y = y - side_offset - height;
+      break;
+    case kTagRightDown:
+      placement.rect.x = x + side_offset;
+      placement.rect.y = y + side_offset;
+      break;
+    case kTagLeftDown:
+      placement.rect.x = x - side_offset - width;
+      placement.rect.y = y + side_offset;
+      break;
+    case kTagAbove:
+      placement.rect.x = x - width / 2;
+      placement.rect.y = y - side_offset - height;
+      break;
+    default:
+      placement.rect.x = x - width / 2;
+      placement.rect.y = y + side_offset;
+      break;
+  }
+  return placement;
+}
+
+bool tagIntersectsPoint(const TagRect& rect, int x, int y) {
+  return x >= rect.x && x < rect.x + rect.width && y >= rect.y &&
+         y < rect.y + rect.height;
+}
+
+int crossProduct(int ax, int ay, int bx, int by, int cx, int cy) {
+  return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+}
+
+bool pointOnSegment(int ax, int ay, int bx, int by, int px, int py) {
+  return px >= std::min(ax, bx) && px <= std::max(ax, bx) &&
+         py >= std::min(ay, by) && py <= std::max(ay, by);
+}
+
+bool segmentsIntersect(int ax, int ay, int bx, int by, int cx, int cy, int dx,
+                       int dy) {
+  const int ab_c = crossProduct(ax, ay, bx, by, cx, cy);
+  const int ab_d = crossProduct(ax, ay, bx, by, dx, dy);
+  const int cd_a = crossProduct(cx, cy, dx, dy, ax, ay);
+  const int cd_b = crossProduct(cx, cy, dx, dy, bx, by);
+  if (((ab_c > 0 && ab_d < 0) || (ab_c < 0 && ab_d > 0)) &&
+      ((cd_a > 0 && cd_b < 0) || (cd_a < 0 && cd_b > 0))) {
+    return true;
+  }
+  return (ab_c == 0 && pointOnSegment(ax, ay, bx, by, cx, cy)) ||
+         (ab_d == 0 && pointOnSegment(ax, ay, bx, by, dx, dy)) ||
+         (cd_a == 0 && pointOnSegment(cx, cy, dx, dy, ax, ay)) ||
+         (cd_b == 0 && pointOnSegment(cx, cy, dx, dy, bx, by));
+}
+
+bool tagIntersectsSegment(const TagRect& rect, int x0, int y0, int x1, int y1) {
+  if (tagIntersectsPoint(rect, x0, y0) || tagIntersectsPoint(rect, x1, y1)) {
+    return true;
+  }
+  const int right = rect.x + rect.width - 1;
+  const int bottom = rect.y + rect.height - 1;
+  return segmentsIntersect(x0, y0, x1, y1, rect.x, rect.y, right, rect.y) ||
+         segmentsIntersect(x0, y0, x1, y1, right, rect.y, right, bottom) ||
+         segmentsIntersect(x0, y0, x1, y1, right, bottom, rect.x, bottom) ||
+         segmentsIntersect(x0, y0, x1, y1, rect.x, bottom, rect.x, rect.y);
+}
+
+bool tagIntersectsStaticUi(const TagRect& rect) {
+  const int cardinal_half_w = radar::kCardinalLabelHeightPx;
+  const int cardinal_h = radar::kCardinalLabelHeightPx + 2;
+  const TagRect reserved[] = {
+      {radar::kCenterX - cardinal_half_w, 0, cardinal_half_w * 2, cardinal_h},
+      {radar::kCenterX - cardinal_half_w, radar::kSize - cardinal_h,
+       cardinal_half_w * 2, cardinal_h},
+      {0, radar::kCenterY - cardinal_half_w, cardinal_h, cardinal_half_w * 2},
+      {radar::kSize - cardinal_h, radar::kCenterY - cardinal_half_w, cardinal_h,
+       cardinal_half_w * 2},
+      {scaleLabelAnchorX(radar::kCenterX, radar::kGridOuterRadius) -
+           s_scale_label_max_w - 6,
+       radar::kCenterY - s_scale_label_h / 2 - 3, s_scale_label_max_w + 9,
+       s_scale_label_h + 6},
+  };
+  for (const TagRect& reserved_rect : reserved) {
+    if (tagRectsOverlap(rect, reserved_rect)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+TagCacheEntry* findTagCacheEntry(const char* hex) {
+  if (hex[0] == '\0') {
+    return nullptr;
+  }
+  for (TagCacheEntry& entry : s_tag_cache) {
+    if (strcmp(entry.hex, hex) == 0) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+TagCacheEntry* claimTagCacheEntry(const char* hex) {
+  if (hex[0] == '\0') {
+    return nullptr;
+  }
+  if (TagCacheEntry* existing = findTagCacheEntry(hex)) {
+    return existing;
+  }
+
+  TagCacheEntry* oldest = &s_tag_cache[0];
+  for (TagCacheEntry& entry : s_tag_cache) {
+    if (entry.hex[0] == '\0') {
+      oldest = &entry;
+      break;
+    }
+    if (entry.last_seen_frame < oldest->last_seen_frame) {
+      oldest = &entry;
+    }
+  }
+  strncpy(oldest->hex, hex, sizeof(oldest->hex) - 1);
+  oldest->hex[sizeof(oldest->hex) - 1] = '\0';
+  oldest->candidate = 0;
+  oldest->last_seen_frame = s_tag_layout_frame;
+  return oldest;
+}
+
+void expireTagCache() {
+  for (TagCacheEntry& entry : s_tag_cache) {
+    if (entry.hex[0] != '\0' &&
+        s_tag_layout_frame - entry.last_seen_frame > kTagCacheExpiryFrames) {
+      entry = TagCacheEntry{};
+    }
+  }
+}
+
+void drawAircraftTag(const TagPlacement& placement,
+                     const services::adsb::Aircraft& plane) {
   initTagLabelMetrics();
   applyTagStyle();
 
   const int line_h = s_draw->fontHeight();
-  const int block_w = measureTagBlockWidth(plane);
-  const int block_h = line_h * 3;
-  int ly = y - block_h / 2;
-
-  const int symbol_half =
-      radar::kAircraftNoseLenPx + radar::kAircraftTailHalfPx;
-  // West (left): tag toward center on the right; east (right): tag on the left.
-  const bool tag_on_right = x < radar::kCenterX;
-  int anchor_x = 0;
-  if (tag_on_right) {
-    anchor_x = x + symbol_half + radar::kAircraftLabelGapPx;
-    anchor_x = std::min(anchor_x, radar::kSize - block_w - 1);
-    s_draw->setTextDatum(textdatum_t::top_left);
-  } else {
-    anchor_x = x - symbol_half - radar::kAircraftLabelGapPx;
-    anchor_x = std::max(anchor_x, block_w + 1);
-    s_draw->setTextDatum(textdatum_t::top_right);
-  }
-  ly = std::max(1, std::min(ly, radar::kSize - block_h - 1));
+  int ly = placement.rect.y;
+  s_draw->setTextDatum(textdatum_t::top_left);
 
   if (plane.callsign[0] != '\0') {
     s_draw->setTextColor(radar::kColorLabel, radar::kColorBackground);
-    s_draw->drawString(plane.callsign, anchor_x, ly);
+    s_draw->drawString(plane.callsign, placement.rect.x, ly);
   }
   ly += line_h;
 
   if (plane.type[0] != '\0') {
     s_draw->setTextColor(radar::kColorTagType, radar::kColorBackground);
-    s_draw->drawString(plane.type, anchor_x, ly);
+    s_draw->drawString(plane.type, placement.rect.x, ly);
   }
   ly += line_h;
 
   if (plane.alt[0] != '\0') {
     s_draw->setTextColor(radar::kColorTagAltitude, radar::kColorBackground);
-    s_draw->drawString(plane.alt, anchor_x, ly);
+    s_draw->drawString(plane.alt, placement.rect.x, ly);
   }
 }
 
@@ -479,6 +684,7 @@ struct AircraftDrawItem {
   int x = 0;
   int y = 0;
   int dist_sq = 0;
+  char hex[sizeof(services::adsb::Aircraft::hex)] = {};
 };
 
 struct BeyondDotDrawItem {
@@ -491,7 +697,10 @@ void sortDrawItemsFarFirst(AircraftDrawItem* items, size_t count) {
   for (size_t i = 1; i < count; ++i) {
     const AircraftDrawItem key = items[i];
     size_t j = i;
-    while (j > 0 && items[j - 1].dist_sq < key.dist_sq) {
+    while (j > 0 &&
+           (items[j - 1].dist_sq < key.dist_sq ||
+            (items[j - 1].dist_sq == key.dist_sq &&
+             strcmp(items[j - 1].hex, key.hex) > 0))) {
       items[j] = items[j - 1];
       --j;
     }
@@ -511,8 +720,96 @@ void sortBeyondDotsFarFirst(BeyondDotDrawItem* items, size_t count) {
   }
 }
 
+bool tagIntersectsSpeedVector(const TagRect& rect, int x, int y,
+                              const services::adsb::Aircraft& plane) {
+  const int len = speedLineLengthPx(plane.gs_knots);
+  if (len <= 0) {
+    return false;
+  }
+
+  int tip_x = 0;
+  int tip_y = 0;
+  noseTip(x, y, plane.nose_deg, &tip_x, &tip_y);
+  constexpr float kDegToRad = 0.01745329252f;
+  const float rad = plane.track_deg * kDegToRad;
+  int end_x = tip_x + static_cast<int>(lroundf(sinf(rad) * len));
+  int end_y = tip_y - static_cast<int>(lroundf(cosf(rad) * len));
+  clipPointToOuterRing(tip_x, tip_y, &end_x, &end_y);
+  return tagIntersectsSegment(rect, tip_x, tip_y, end_x, end_y);
+}
+
+int tagPlacementCollisionScore(
+    const TagPlacement& placement, const AircraftDrawItem* items,
+    size_t draw_count, const services::adsb::Aircraft* planes,
+    const TagPlacement* accepted, size_t accepted_count) {
+  constexpr int kCollisionPenalty = 100000;
+  if (!tagRectOnScreen(placement.rect)) {
+    return kCollisionPenalty * 4;
+  }
+
+  int score = tagIntersectsStaticUi(placement.rect) ? kCollisionPenalty : 0;
+  const int symbol_half =
+      radar::kAircraftNoseLenPx + radar::kAircraftTailHalfPx;
+  for (size_t i = 0; i < draw_count; ++i) {
+    const TagRect symbol = {items[i].x - symbol_half, items[i].y - symbol_half,
+                            symbol_half * 2, symbol_half * 2};
+    if (tagRectsOverlap(placement.rect, symbol)) {
+      score += kCollisionPenalty;
+    }
+    if (tagIntersectsSpeedVector(placement.rect, items[i].x, items[i].y,
+                                 planes[items[i].index])) {
+      score += kCollisionPenalty;
+    }
+  }
+  for (size_t i = 0; i < accepted_count; ++i) {
+    score += tagOverlapArea(placement.rect, accepted[i].rect);
+  }
+  return score;
+}
+
+void tagCandidateOrder(bool prefer_right, uint8_t* candidates) {
+  static constexpr uint8_t kPreferRight[kTagCandidateCount] = {
+      kTagRight, kTagRightUp, kTagRightDown, kTagAbove,
+      kTagBelow, kTagLeft,    kTagLeftUp,    kTagLeftDown,
+  };
+  static constexpr uint8_t kPreferLeft[kTagCandidateCount] = {
+      kTagLeft, kTagLeftUp, kTagLeftDown, kTagAbove,
+      kTagBelow, kTagRight, kTagRightUp,  kTagRightDown,
+  };
+  const uint8_t* order = prefer_right ? kPreferRight : kPreferLeft;
+  for (size_t i = 0; i < kTagCandidateCount; ++i) {
+    candidates[i] = order[i];
+  }
+}
+
+void drawTagLeaderLine(int aircraft_x, int aircraft_y,
+                       const TagPlacement& placement,
+                       uint8_t default_candidate) {
+  if (placement.candidate == default_candidate) {
+    return;
+  }
+  const int end_x = std::max(placement.rect.x,
+                             std::min(aircraft_x,
+                                      placement.rect.x + placement.rect.width - 1));
+  const int end_y = std::max(placement.rect.y,
+                             std::min(aircraft_y,
+                                      placement.rect.y + placement.rect.height - 1));
+  s_draw->drawLine(aircraft_x, aircraft_y, end_x, end_y, radar::kColorGrid);
+}
+
 void drawAircraft() {
   initLabelMetrics();
+  const uint8_t range_index = radar::rangeIndex();
+  if (range_index != s_tag_cache_range_index) {
+    memset(s_tag_cache, 0, sizeof(s_tag_cache));
+    s_tag_cache_range_index = range_index;
+  }
+  ++s_tag_layout_frame;
+  if (s_tag_layout_frame == 0) {
+    s_tag_layout_frame = 1;
+    memset(s_tag_cache, 0, sizeof(s_tag_cache));
+  }
+  expireTagCache();
 
   // Snapshot under the adsb lock (the fetch may run on another thread).
   static services::adsb::Aircraft planes[services::adsb::kMaxAircraft];
@@ -544,6 +841,9 @@ void drawAircraft() {
       items[draw_count].x = x;
       items[draw_count].y = y;
       items[draw_count].dist_sq = distSqFromCenter(x, y);
+      strncpy(items[draw_count].hex, planes[i].hex,
+              sizeof(items[draw_count].hex) - 1);
+      items[draw_count].hex[sizeof(items[draw_count].hex) - 1] = '\0';
       ++draw_count;
       continue;
     }
@@ -573,9 +873,65 @@ void drawAircraft() {
                     planes[i].gs_knots, radar::kColorTrackVector);
     drawHeadingTriangle(x, y, planes[i].nose_deg, radar::kColorAircraft);
   }
+  TagPlacement accepted[services::adsb::kMaxAircraft];
+  size_t accepted_count = 0;
   for (size_t d = 0; d < draw_count; ++d) {
     const size_t i = items[d].index;
-    drawAircraftTag(items[d].x, items[d].y, planes[i]);
+    const services::adsb::Aircraft& plane = planes[i];
+    if (!hasAircraftTag(plane)) {
+      continue;
+    }
+
+    initTagLabelMetrics();
+    applyTagStyle();
+    const int width = measureTagBlockWidth(plane);
+    const int height = s_draw->fontHeight() * 3;
+    const uint8_t default_candidate =
+        items[d].x < radar::kCenterX ? kTagRight : kTagLeft;
+    const TagCacheEntry* cached = findTagCacheEntry(plane.hex);
+    TagPlacement selected;
+    bool found_clear_placement = false;
+
+    if (cached != nullptr) {
+      const TagPlacement prior = tagPlacementForCandidate(
+          items[d].x, items[d].y, width, height, cached->candidate);
+      if (tagPlacementCollisionScore(prior, items, draw_count, planes, accepted,
+                                     accepted_count) == 0) {
+        selected = prior;
+        found_clear_placement = true;
+      }
+    }
+
+    uint8_t candidates[kTagCandidateCount];
+    tagCandidateOrder(default_candidate == kTagRight, candidates);
+    int best_score = 0x7fffffff;
+    TagPlacement best;
+    for (uint8_t candidate : candidates) {
+      const TagPlacement placement = tagPlacementForCandidate(
+          items[d].x, items[d].y, width, height, candidate);
+      const int score = tagPlacementCollisionScore(
+          placement, items, draw_count, planes, accepted, accepted_count);
+      if (score < best_score) {
+        best_score = score;
+        best = placement;
+      }
+      if (!found_clear_placement && score == 0) {
+        selected = placement;
+        found_clear_placement = true;
+        break;
+      }
+    }
+    if (!found_clear_placement) {
+      selected = best;
+    }
+
+    if (TagCacheEntry* entry = claimTagCacheEntry(plane.hex)) {
+      entry->candidate = selected.candidate;
+      entry->last_seen_frame = s_tag_layout_frame;
+    }
+    drawTagLeaderLine(items[d].x, items[d].y, selected, default_candidate);
+    drawAircraftTag(selected, plane);
+    accepted[accepted_count++] = selected;
   }
 }
 
