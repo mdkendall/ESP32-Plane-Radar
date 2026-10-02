@@ -232,9 +232,11 @@ void formatAltitudeTag(const JsonObject& plane, char* out, size_t out_len) {
 }
 
 void fillTagFields(Aircraft* ac, const JsonObject& plane) {
+  copyJsonStringTrimmed(plane, "hex", ac->hex, sizeof(ac->hex));
   copyJsonStringTrimmed(plane, "flight", ac->callsign, sizeof(ac->callsign));
   if (ac->callsign[0] == '\0') {
-    copyJsonStringTrimmed(plane, "hex", ac->callsign, sizeof(ac->callsign));
+    strncpy(ac->callsign, ac->hex, sizeof(ac->callsign) - 1);
+    ac->callsign[sizeof(ac->callsign) - 1] = '\0';
   }
 
   copyJsonStringTrimmed(plane, "t", ac->type, sizeof(ac->type));
