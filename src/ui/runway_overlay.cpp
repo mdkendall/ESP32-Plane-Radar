@@ -18,8 +18,17 @@ constexpr float kKmPerDeg = 111.0f;
 constexpr float kDegToRad = 3.14159265f / 180.0f;
 constexpr size_t kMaxAirportLabels = 32;
 
+struct LabelRect {
+  int x;
+  int y;
+  int width;
+  int height;
+};
+
 bool s_in_range[data::large_airports::kAirportCount];
 bool s_label_pending[data::large_airports::kAirportCount];
+LabelRect s_label_bounds[kMaxAirportLabels];
+size_t s_label_bounds_count = 0;
 
 bool s_runway_label_ready = false;
 bool s_runway_label_use_vlw = false;
@@ -162,7 +171,8 @@ bool segmentIntersectsDisc(int x0, int y0, int x1, int y1) {
   return (t0 >= 0.0f && t0 <= 1.0f) || (t1 >= 0.0f && t1 <= 1.0f);
 }
 
-void drawBoldRunwayLabel(lgfx::LGFXBase& gfx, const char* ident, int mx, int my) {
+LabelRect drawBoldRunwayLabel(lgfx::LGFXBase& gfx, const char* ident, int mx,
+                              int my) {
   const int tw = gfx.textWidth(ident);
   const int th = gfx.fontHeight();
   constexpr int kPadX = 2;
@@ -176,6 +186,7 @@ void drawBoldRunwayLabel(lgfx::LGFXBase& gfx, const char* ident, int mx, int my)
   gfx.drawString(ident, mx - 1, my);
   gfx.drawString(ident, mx + 1, my);
   gfx.drawString(ident, mx, my);
+  return {left, top, tw + kPadX * 2, th + kPadY};
 }
 
 bool drawRunwayLine(lgfx::LGFXBase& gfx, const data::large_airports::Runway& rw) {
@@ -233,8 +244,8 @@ void clipPointOntoOuterRing(int* x, int* y) {
   *y = cy + static_cast<int>(lroundf(static_cast<float>(dy) * scale));
 }
 
-void drawAirportLabel(lgfx::LGFXBase& gfx,
-                      const data::large_airports::Airport& ap) {
+LabelRect drawAirportLabel(lgfx::LGFXBase& gfx,
+                           const data::large_airports::Airport& ap) {
   int ax = 0;
   int ay = 0;
   latLonToScreen(e7ToDeg(ap.lat_e7), e7ToDeg(ap.lon_e7), &ax, &ay);
@@ -243,12 +254,13 @@ void drawAirportLabel(lgfx::LGFXBase& gfx,
   int lx = 0;
   int ly = 0;
   offsetLabelFromCenter(ax, ay, &lx, &ly);
-  drawBoldRunwayLabel(gfx, ap.ident, lx, ly);
+  return drawBoldRunwayLabel(gfx, ap.ident, lx, ly);
 }
 
 }  // namespace
 
 void drawLargeAirportRunways(lgfx::LGFXBase& gfx) {
+  s_label_bounds_count = 0;
   if (!radar::showRunways()) {
     return;
   }
@@ -294,8 +306,20 @@ void drawLargeAirportRunways(lgfx::LGFXBase& gfx) {
   initRunwayLabelStyle(gfx);
   applyRunwayLabelStyle(gfx);
   for (size_t i = 0; i < label_count; ++i) {
-    drawAirportLabel(gfx, data::large_airports::kAirports[label_airports[i]]);
+    s_label_bounds[s_label_bounds_count++] =
+        drawAirportLabel(gfx, data::large_airports::kAirports[label_airports[i]]);
   }
+}
+
+bool airportLabelOverlaps(int x, int y, int width, int height) {
+  for (size_t i = 0; i < s_label_bounds_count; ++i) {
+    const LabelRect& label = s_label_bounds[i];
+    if (x < label.x + label.width && x + width > label.x &&
+        y < label.y + label.height && y + height > label.y) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace ui::runway

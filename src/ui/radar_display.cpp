@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
 
 #include "config.h"
 #include "hardware/display.h"
@@ -494,6 +495,14 @@ bool tagRectOnScreen(const TagRect& rect) {
          rect.y + rect.height < radar::kSize - 1;
 }
 
+TagPlacement constrainTagPlacementToScreen(TagPlacement placement) {
+  placement.rect.x =
+      std::max(1, std::min(placement.rect.x, radar::kSize - placement.rect.width - 2));
+  placement.rect.y = std::max(
+      1, std::min(placement.rect.y, radar::kSize - placement.rect.height - 2));
+  return placement;
+}
+
 TagPlacement tagPlacementForCandidate(int x, int y, int width, int height,
                                       uint8_t candidate) {
   const int symbol_half =
@@ -603,7 +612,7 @@ bool tagIntersectsStaticUi(const TagRect& rect) {
       return true;
     }
   }
-  return false;
+  return runway::airportLabelOverlaps(rect.x, rect.y, rect.width, rect.height);
 }
 
 TagCacheEntry* findTagCacheEntry(const char* hex) {
@@ -744,7 +753,7 @@ int tagPlacementCollisionScore(
     const TagPlacement* accepted, size_t accepted_count) {
   constexpr int kCollisionPenalty = 100000;
   if (!tagRectOnScreen(placement.rect)) {
-    return kCollisionPenalty * 4;
+    return std::numeric_limits<int>::max();
   }
 
   int score = tagIntersectsStaticUi(placement.rect) ? kCollisionPenalty : 0;
@@ -794,7 +803,19 @@ void drawTagLeaderLine(int aircraft_x, int aircraft_y,
   const int end_y = std::max(placement.rect.y,
                              std::min(aircraft_y,
                                       placement.rect.y + placement.rect.height - 1));
-  s_draw->drawLine(aircraft_x, aircraft_y, end_x, end_y, radar::kColorGrid);
+  const int dx = end_x - aircraft_x;
+  const int dy = end_y - aircraft_y;
+  const float length = sqrtf(static_cast<float>(dx * dx + dy * dy));
+  if (length <= 0.0f) {
+    return;
+  }
+  const int symbol_half =
+      radar::kAircraftNoseLenPx + radar::kAircraftTailHalfPx;
+  const int start_x =
+      aircraft_x + static_cast<int>(lroundf(dx / length * symbol_half));
+  const int start_y =
+      aircraft_y + static_cast<int>(lroundf(dy / length * symbol_half));
+  s_draw->drawLine(start_x, start_y, end_x, end_y, radar::kColorGrid);
 }
 
 void drawAircraft() {
@@ -902,27 +923,33 @@ void drawAircraft() {
       }
     }
 
-    uint8_t candidates[kTagCandidateCount];
-    tagCandidateOrder(default_candidate == kTagRight, candidates);
-    int best_score = 0x7fffffff;
-    TagPlacement best;
-    for (uint8_t candidate : candidates) {
-      const TagPlacement placement = tagPlacementForCandidate(
-          items[d].x, items[d].y, width, height, candidate);
-      const int score = tagPlacementCollisionScore(
-          placement, items, draw_count, planes, accepted, accepted_count);
-      if (score < best_score) {
-        best_score = score;
-        best = placement;
-      }
-      if (!found_clear_placement && score == 0) {
-        selected = placement;
-        found_clear_placement = true;
-        break;
-      }
-    }
     if (!found_clear_placement) {
-      selected = best;
+      uint8_t candidates[kTagCandidateCount];
+      tagCandidateOrder(default_candidate == kTagRight, candidates);
+      int best_score = std::numeric_limits<int>::max();
+      TagPlacement best;
+      for (uint8_t candidate : candidates) {
+        const TagPlacement placement = tagPlacementForCandidate(
+            items[d].x, items[d].y, width, height, candidate);
+        const int score = tagPlacementCollisionScore(
+            placement, items, draw_count, planes, accepted, accepted_count);
+        if (score < best_score) {
+          best_score = score;
+          best = placement;
+        }
+        if (score == 0) {
+          selected = placement;
+          found_clear_placement = true;
+          break;
+        }
+      }
+      if (!found_clear_placement) {
+        selected =
+            best_score == std::numeric_limits<int>::max()
+                ? constrainTagPlacementToScreen(tagPlacementForCandidate(
+                      items[d].x, items[d].y, width, height, default_candidate))
+                : best;
+      }
     }
 
     if (TagCacheEntry* entry = claimTagCacheEntry(plane.hex)) {
